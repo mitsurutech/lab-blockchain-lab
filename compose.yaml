@@ -1,0 +1,280 @@
+# A toy blockchain you can read, in a JupyterLab of your own: a chain of blocks, hashes,
+# mining, a ledger, a signature and a fork, in a few short files of plain Python.
+#
+# This is a toy that teaches the ideas. It has no coin, no network, no market and no price,
+# it gives no advice about money, and nothing in it is secure enough to use for real.
+#
+# Your copy is the only thing you may use, and it is the only thing you can reach: this lab
+# has no way out to the internet, so nothing you try can touch anybody else's machine.
+#
+# Open JupyterLab from the lab's page. The work folder holds chain.py (blocks, hashing,
+# mining and checking a chain), ledger.py (balances worked out from payments), lamport.py (a
+# one-time signature made only of hashes), start.ipynb, a notebook to begin from, and steps/,
+# short scripts that each do one idea and print the same every time. The terminal beside the
+# lab reaches the same Python with docker exec, for example
+#   docker exec jupyter python3 steps/link.py
+#
+# Hand in a notebook of your own that uses chain.py to answer a question you chose (for
+# example how the number of tries grows with the difficulty, or what it takes to change an
+# old block and still have a valid chain), downloaded from JupyterLab with File, Download,
+# and a sentence on what you found.
+#
+# The image runs as its own unprivileged account and needs no capabilities. JupyterLab asks
+# for no token, because the platform's own door in front of it already knows who you are; do
+# not run it like this anywhere else. Nothing is saved: download your notebook before you stop
+# the lab, because stopping it forgets every file you made.
+
+services:
+  jupyter:
+    image: jupyter/scipy-notebook:2023-10-20
+    user: "1000:100"
+    expose: ["8888"]
+    working_dir: /home/jovyan/work
+    environment:
+      HOME: /home/jovyan
+      PYTHONPATH: /home/jovyan/work
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mkdir -p /home/jovyan/work/steps /tmp/lab
+        cd /home/jovyan/work
+        cat > chain.py <<'PY'
+        """A toy blockchain: a few lines of Python you can read. It teaches the ideas and is not a
+        real system: nothing here talks to a network and nothing here is worth anything."""
+        import hashlib
+        import json
+
+        ZEROS = "0" * 64
+
+
+        def block_hash(block):
+            """The fingerprint of a block: SHA-256 of its index, previous hash, transactions and nonce."""
+            body = {k: block[k] for k in ("index", "previous", "transactions", "nonce")}
+            text = json.dumps(body, sort_keys=True)
+            return hashlib.sha256(text.encode()).hexdigest()
+
+
+        def new_block(index, previous, transactions):
+            return {"index": index, "previous": previous, "transactions": transactions,
+                    "nonce": 0, "hash": ""}
+
+
+        def mine(block, difficulty):
+            """Try nonce 0, 1, 2 ... until the hash starts with difficulty zero hex digits.
+            Returns how many tries it took."""
+            wanted = "0" * difficulty
+            block["nonce"] = 0
+            while not block_hash(block).startswith(wanted):
+                block["nonce"] += 1
+            block["hash"] = block_hash(block)
+            return block["nonce"] + 1
+
+
+        def add_block(chain, transactions, difficulty):
+            previous = chain[-1]["hash"] if chain else ZEROS
+            block = new_block(len(chain), previous, transactions)
+            mine(block, difficulty)
+            chain.append(block)
+            return block
+
+
+        def valid(chain, difficulty):
+            """Check every block. Answers (True, None), or (False, index of the first bad block)."""
+            for n, block in enumerate(chain):
+                if block["hash"] != block_hash(block):
+                    return False, n
+                if not block["hash"].startswith("0" * difficulty):
+                    return False, n
+                before = chain[n - 1]["hash"] if n > 0 else ZEROS
+                if block["previous"] != before:
+                    return False, n
+            return True, None
+
+
+        def work(chain, difficulty):
+            """A chain's work: each block cost about 16 ** difficulty tries."""
+            return len(chain) * 16 ** difficulty
+        PY
+        cat > ledger.py <<'PY'
+        """A toy ledger: balances are not stored anywhere, they are worked out by replaying the
+        transactions from the start, and a payment bigger than the balance is refused."""
+
+
+        def balances(start, transactions):
+            """Answers (balances, refused). start is a dict of opening balances."""
+            money = dict(start)
+            refused = []
+            for tx in transactions:
+                if money.get(tx["from"], 0) < tx["amount"]:
+                    refused.append(tx)
+                    continue
+                money[tx["from"]] -= tx["amount"]
+                money[tx["to"]] = money.get(tx["to"], 0) + tx["amount"]
+            return money, refused
+        PY
+        cat > lamport.py <<'PY'
+        """A Lamport one-time signature: a real signature made of nothing but hashes. A key pair signs
+        ONE message and must then be thrown away. It teaches the idea of signing and is not for use."""
+        import hashlib
+
+
+        def h(data):
+            return hashlib.sha256(data).digest()
+
+
+        def keypair(seed):
+            """256 pairs of secrets from a fixed seed, and the hash of each as the public key."""
+            secret = [[h((seed + ":" + str(i) + ":" + str(bit)).encode()) for bit in (0, 1)]
+                      for i in range(256)]
+            public = [[h(one) for one in pair] for pair in secret]
+            return secret, public
+
+
+        def bits(message):
+            digest = hashlib.sha256(message.encode()).digest()
+            return [(digest[i // 8] >> (7 - i % 8)) & 1 for i in range(256)]
+
+
+        def sign(message, secret):
+            """Reveal one secret of each pair, chosen by the message's own bits."""
+            return [secret[i][bit] for i, bit in enumerate(bits(message))]
+
+
+        def verify(message, signature, public):
+            """Hash each revealed secret and compare it with the public key."""
+            return all(h(signature[i]) == public[i][bit] for i, bit in enumerate(bits(message)))
+        PY
+        cat > steps/link.py <<'PY'
+        from chain import add_block
+
+        DIFFICULTY = 3
+        chain = []
+        for payments in (["Asha pays Ben 5"], ["Ben pays Cara 2"], ["Cara pays Asha 1"]):
+            add_block(chain, payments, DIFFICULTY)
+        for block in chain:
+            print("block", block["index"], "previous", block["previous"][:10], "hash", block["hash"][:10])
+        print("each block holds the hash of the one before it")
+        PY
+        cat > steps/tamper.py <<'PY'
+        from chain import add_block, mine, valid
+
+        DIFFICULTY = 3
+        chain = []
+        for payments in (["Asha pays Ben 5"], ["Ben pays Cara 2"], ["Cara pays Asha 1"]):
+            add_block(chain, payments, DIFFICULTY)
+        print("before:", valid(chain, DIFFICULTY))
+        chain[1]["transactions"] = ["Ben pays Cara 200"]
+        print("after changing one amount in block 1:", valid(chain, DIFFICULTY))
+        chain[1]["hash"] = "000" + chain[1]["hash"][3:]
+        print("after also faking block 1's hash:", valid(chain, DIFFICULTY))
+        mine(chain[1], DIFFICULTY)
+        print("after mining block 1 again:", valid(chain, DIFFICULTY))
+        PY
+        cat > steps/mine.py <<'PY'
+        from chain import block_hash, mine, new_block
+
+        block = new_block(1, "0" * 64, ["Asha pays Ben 5"])
+        for difficulty in (1, 2, 3, 4):
+            tries = mine(block, difficulty)
+            print("difficulty", difficulty, "nonce", block["nonce"], "tries", tries, "hash", block["hash"][:12])
+        PY
+        cat > steps/balances.py <<'PY'
+        from ledger import balances
+
+        start = {"Asha": 10, "Ben": 5, "Cara": 0}
+        payments = [
+            {"from": "Asha", "to": "Ben", "amount": 4},
+            {"from": "Ben", "to": "Cara", "amount": 6},
+            {"from": "Cara", "to": "Asha", "amount": 8},
+            {"from": "Ben", "to": "Cara", "amount": 3},
+        ]
+        money, refused = balances(start, payments)
+        print("balances:", money)
+        for tx in refused:
+            print("refused:", tx["from"], "to", tx["to"], tx["amount"])
+        PY
+        cat > steps/sign.py <<'PY'
+        from lamport import keypair, sign, verify
+
+        secret, public = keypair("lab-seed")
+        message = "Asha pays Ben 5"
+        signature = sign(message, secret)
+        print("public key holds", len(public), "pairs of hashes")
+        print("signature holds", len(signature), "revealed secrets")
+        print("signed message checks out:", verify(message, signature, public))
+        changed = "Asha pays Ben 6"
+        print("one letter changed checks out:", verify(changed, signature, public))
+        PY
+        cat > steps/fork.py <<'PY'
+        from chain import add_block, valid, work
+
+        DIFFICULTY = 2
+        shared = []
+        add_block(shared, ["Asha pays Ben 5"], DIFFICULTY)
+        add_block(shared, ["Ben pays Cara 2"], DIFFICULTY)
+        a = list(shared)
+        b = list(shared)
+        add_block(a, ["Cara pays Asha 1"], DIFFICULTY)
+        add_block(b, ["Cara pays Ben 1"], DIFFICULTY)
+        add_block(b, ["Ben pays Asha 3"], DIFFICULTY)
+        print("both chains valid:", valid(a, DIFFICULTY)[0], valid(b, DIFFICULTY)[0])
+        print("chain A blocks:", len(a), "work:", work(a, DIFFICULTY))
+        print("chain B blocks:", len(b), "work:", work(b, DIFFICULTY))
+        print("the chain with more work wins:", "A" if work(a, DIFFICULTY) > work(b, DIFFICULTY) else "B")
+        print("same last block in both?", a[-1]["hash"] == b[-1]["hash"])
+        PY
+        cat > /tmp/lab/make.py <<'PY'
+        import json
+
+
+        def md(text):
+            return {"cell_type": "markdown", "metadata": {}, "source": text}
+
+
+        def code(text):
+            return {"cell_type": "code", "metadata": {}, "source": text, "outputs": [],
+                    "execution_count": None}
+
+
+        cells = [
+            md("# A toy blockchain\n\nThis is a toy that teaches the ideas. It has no coin, no network "
+               "and no value. chain.py, ledger.py and lamport.py are short enough to read in full. "
+               "Run each cell with Shift and Enter."),
+            code("from chain import add_block, valid\n\nDIFFICULTY = 3\nchain = []\nadd_block(chain, [\"Asha pays Ben 5\"], DIFFICULTY)\nadd_block(chain, [\"Ben pays Cara 2\"], DIFFICULTY)\nchain[1]"),
+            code("valid(chain, DIFFICULTY)"),
+            code("chain[0][\"transactions\"] = [\"Asha pays Ben 500\"]\nvalid(chain, DIFFICULTY)"),
+            md("## Your own question\n\nAdd a cell below. What happens if you change only the nonce? "
+               "What if you mine at difficulty 5? Does the chain stay valid if you re-mine block 0 "
+               "but leave block 1 alone?"),
+        ]
+        book = {"cells": cells, "nbformat": 4, "nbformat_minor": 5,
+                "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3 (ipykernel)",
+                                            "language": "python"},
+                             "language_info": {"name": "python"}}}
+        with open("start.ipynb", "w") as out:
+            json.dump(book, out, indent=1)
+        PY
+        python3 /tmp/lab/make.py
+
+        exec jupyter lab --no-browser --ip=0.0.0.0 --port=8888 \
+          --ServerApp.root_dir=/home/jovyan/work \
+          --IdentityProvider.token= --ServerApp.password= \
+          '--ServerApp.allow_origin=*' --ServerApp.allow_remote_access=True \
+          --LabApp.check_for_updates_class=jupyterlab.NeverCheckForUpdate \
+          --LabApp.news_url=None
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/api', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    labels:
+      lab.title: JupyterLab
+      lab.open: "8888"
